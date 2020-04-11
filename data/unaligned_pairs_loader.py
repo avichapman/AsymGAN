@@ -1,10 +1,10 @@
+import argparse
 from torch.utils.data import Dataset
 import random
 import h5py
 import time
 import numpy as np
 from PIL import Image
-from torch import Tensor
 from torchvision import transforms
 from typing import Tuple
 
@@ -16,6 +16,9 @@ class UnalignedPairsDataset(Dataset):
             shuffle: bool = True,
             transform=None,
             train: bool = False):
+
+        self.division = 3  # Divide images into sections 1/9 in size
+        image_paths = image_paths * self.division * self.division
         if shuffle:
             random.shuffle(image_paths)
 
@@ -89,7 +92,35 @@ class UnalignedPairsDataset(Dataset):
         gt_file = self.load_gt_path(gt_path)
         target = np.asarray(gt_file['density'])
 
+        # Pick random slice of image...
+        crop_size = [img.size[0] // self.division, img.size[1] // self.division]
+        dx = int(random.random()*img.size[0]*1./self.division)
+        dy = int(random.random()*img.size[1]*1./self.division)
+
+        # Adjust slice so that its width and height are evenly divisible by 4...
+        if crop_size[0] % 4 != 0:
+            crop_size[0] += 4 - crop_size[0] % 4
+        if crop_size[1] % 4 != 0:
+            crop_size[1] += 4 - crop_size[1] % 4
+
+        img = img.crop((dx, dy, crop_size[0]+dx, crop_size[1]+dy))
+        target = target[dy:int(crop_size[1]+dy), dx:int(crop_size[0]+dx)]
+
         # CSRNet required a 1/8 size output. We don't...
         # target = cv2.resize(target, (target.shape[1] // 8, target.shape[0] // 8), interpolation=cv2.INTER_CUBIC) * 64
 
         return img, target
+
+    @staticmethod
+    def modify_commandline_options(parser: argparse.ArgumentParser, is_train: bool):
+        """Add new dataset-specific options, and rewrite default values for existing options.
+
+        Parameters:
+            parser (ArgumentParser) -- original option parser
+            is_train (bool) -- whether training phase or test phase. You can use this flag to add training-specific or
+                               test-specific options.
+
+        Returns:
+            the modified parser.
+        """
+        return parser

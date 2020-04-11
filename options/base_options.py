@@ -1,7 +1,9 @@
 import argparse
+import data
+import models
 import os
-from utils import util
 import torch
+from utils import util
 
 
 class BaseOptions:
@@ -12,7 +14,7 @@ class BaseOptions:
     """
 
     def __init__(self):
-        """Reset the class; indicates the class hasn't been initailized"""
+        """Reset the class; indicates the class hasn't been initialized"""
         self.initialized = False
         self.parser = None
         self.isTrain = True
@@ -27,6 +29,7 @@ class BaseOptions:
         parser.add_argument('--checkpoints_dir', type=str, default='./checkpoints', help='models are saved here')
 
         # model parameters
+        parser.add_argument('--model', type=str, default='cycle_gan', help='chooses which model to use. [cycle_gan | asymgan]')
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=1, help='# of output image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in the last conv layer')
@@ -39,6 +42,7 @@ class BaseOptions:
         parser.add_argument('--init_gain', type=float, default=0.02, help='scaling factor for normal, xavier and orthogonal.')
         parser.add_argument('--no_dropout', action='store_true', help='no dropout for the generator')
         # dataset parameters
+        parser.add_argument('--dataset_mode', type=str, default='unaligned_pairs', help='chooses how datasets are loaded. [unaligned]')
         parser.add_argument('--direction', type=str, default='AtoB', help='AtoB or BtoA')
         parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
         parser.add_argument('--num_threads', default=4, type=int, help='# threads for loading data')
@@ -72,11 +76,15 @@ class BaseOptions:
         opt, _ = parser.parse_known_args()
 
         # modify model-related parser options
-        parser.set_defaults(no_dropout=True)  # default CycleGAN did not use dropout
-        if self.isTrain:
-            parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
-            parser.add_argument('--lambda_B', type=float, default=10.0, help='weight for cycle loss (B -> A -> B)')
+        model_name = opt.model
+        model_option_setter = models.get_option_setter(model_name)
+        parser = model_option_setter(parser, self.isTrain)
         opt, _ = parser.parse_known_args()  # parse again with new defaults
+
+        # modify dataset-related parser options
+        dataset_name = opt.dataset_mode
+        dataset_option_setter = data.get_option_setter(dataset_name)
+        parser = dataset_option_setter(parser, self.isTrain)
 
         # save and return the parser
         self.parser = parser
