@@ -3,6 +3,7 @@ import torch
 import itertools
 from . import networks
 from . import base_model
+from . import style_loss_net
 from utils.image_pool import ImagePool
 
 
@@ -121,6 +122,7 @@ class AsymGANModel(base_model.BaseModel):
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionCycle = torch.nn.L1Loss()
+            self.styleLossNet = style_loss_net.StyleLossNet()
 
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(),
@@ -143,7 +145,10 @@ class AsymGANModel(base_model.BaseModel):
         self.fake_B = None
         self.fake_Z = None
         self.rec_A = None
+        self.rec_A_real_Z = None
         self.rec_B = None
+        self.rec_B_fake_Z = None
+        self.fake_A_fake_Z = None
         self.rec_Z = None
         self.loss_D_A = None
         self.loss_D_B = None
@@ -179,12 +184,15 @@ class AsymGANModel(base_model.BaseModel):
         # Forward pass, as shown in Fig 2 (1) in the paper...
         self.fake_B = self.netG_A(self.real_A)  # G_A(A)
         self.fake_Z = self.netE(self.real_A)    # E(A)
-        self.rec_A = self.netG_B.forward_with_parts(self.fake_B, self.fake_Z)   # G_B(G_A(A), Z(A))
+        self.rec_A = self.netG_B.forward_with_parts(self.fake_B, self.fake_Z)          # G_B(G_A(X), Z(X))
+        self.rec_A_real_Z = self.netG_B.forward_with_parts(self.fake_B, self.real_Z)   # G_B(G_A(X), E)
 
         # Backward pass, as shown in Fig 2 (2) in the paper...
-        self.fake_A = self.netG_B.forward_with_parts(self.real_B, self.real_Z)  # G_B(B, Z)
-        self.rec_B = self.netG_A(self.fake_A)                                   # G_A(G_B(B, Z))
-        self.rec_Z = self.netE(self.fake_A)                                     # E(G_B(B, Z))
+        self.fake_A = self.netG_B.forward_with_parts(self.real_B, self.real_Z)         # G_B(Y, Z)
+        self.rec_B = self.netG_A(self.fake_A)                                          # G_A(G_B(Y, Z))
+        self.fake_A_fake_Z = self.netG_B.forward_with_parts(self.real_B, self.fake_Z)  # G_B(Y, E(X))
+        self.rec_B_fake_Z = self.netG_A(self.fake_A_fake_Z)                            # G_A(G_B(Y, E(X)))
+        self.rec_Z = self.netE(self.fake_A)                                            # E(G_B(Y, Z))
 
     def backward_d_basic(self, net_d, real, fake):
         """Calculate GAN loss for the discriminator
@@ -255,15 +263,18 @@ class AsymGANModel(base_model.BaseModel):
         # E[log(D_X(X)) + log(1 - D_X(G_B(B, E(A)))]    (Eqn. (14) in the paper)
         self.loss_G_B = lambda_6 * self.criterionGAN(self.netD_B(self.fake_A), True)
 
-        # Content Loss: avg(E[||φ_j(G_B(Y, E(A))) - φ_j(Y)||^2]) (Eqn. (15) in the )
-        self.loss_content = lambda_7  # TODO: Do Content Loss
-
-        # Style Loss: E[P_φj(G_B(Y, E(A))) - P_φj(X)]_F^2 (Eqn. (16) in the )
-        self.loss_style = lambda_8  # TODO: Do Style Loss
-
+        # Get style and content losses.
+        # Content Loss: avg(E[||φ_j(G_B(Y, E(A))) - φ_j(Y)||^2]) (Eqn. (15) in the paper)
+        # Style Loss: E[P_φj(G_B(Y, E(A))) - P_φj(X)]_F^2 (Eqn. (16) in the paper)
         # Total Variation Loss: (ϕ(G_A(A)) + ϕ(G_B(G_A(A), E(A))) + ϕ(G_B(G_A(A), E))
         #                           + ϕ(G_B(Y, E)) + ϕ(G_A(G_B(B, E))) + ϕ(G_A(G_B(B, E(A))))) (Eqn. (18) in the paper)
-        self.loss_total_variation = lambda_9  # TODO: Do Style Loss
+        self.loss_style, self.loss_content, self.loss_total_variation = \
+            self.styleLossNet.calculate_losses(self.real_A, self.fake_A, self.fake_A_fake_Z, self.rec_A,
+                                               self.real_B, self.rec_B_fake_Z, self.rec_B)
+
+        self.loss_content = lambda_7 * self.loss_content
+        self.loss_style = lambda_8 * self.loss_style
+        self.loss_total_variation = lambda_9 * self.loss_total_variation
 
         # combined loss and calculate gradients
         self.loss_G = self.loss_D_Z + self.loss_cycle_A + self.loss_cycle_B + self.loss_cycle_Z + self.loss_G_A + \
