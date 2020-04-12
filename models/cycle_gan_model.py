@@ -1,9 +1,8 @@
+from argparse import ArgumentParser
 import torch
 import itertools
-import os
 from . import networks
 from . import base_model
-from collections import OrderedDict
 from utils.image_pool import ImagePool
 
 
@@ -11,7 +10,7 @@ class CycleGANModel(base_model.BaseModel):
     """
     This class implements the CycleGAN model, for learning image-to-image translation without paired data.
 
-    The model training requires '--dataset_mode unaligned' dataset.
+    The model training requires '--dataset_mode unaligned_pairs' dataset.
     By default, it uses a '--netG resnet_9blocks' ResNet generator,
     a '--netD basic' discriminator (PatchGAN introduced by pix2pix),
     and a least-square GANs objective ('--gan_mode lsgan').
@@ -19,7 +18,7 @@ class CycleGANModel(base_model.BaseModel):
     CycleGAN paper: https://arxiv.org/pdf/1703.10593.pdf
     """
     @staticmethod
-    def modify_commandline_options(parser, is_train=True):
+    def modify_commandline_options(parser: ArgumentParser, is_train: bool = True):
         """Add new dataset-specific options, and rewrite default values for existing options.
 
         Parameters:
@@ -72,15 +71,17 @@ class CycleGANModel(base_model.BaseModel):
         # The naming is different from those used in the paper.
         # Code (vs. paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
         self.netG_A = networks.define_generator(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+                                                not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
         self.netG_B = networks.define_generator(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+                                                not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:  # define discriminators
             self.netD_A = networks.define_discriminator(opt.output_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+                                                        opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain,
+                                                        self.gpu_ids)
             self.netD_B = networks.define_discriminator(opt.input_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+                                                        opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain,
+                                                        self.gpu_ids)
 
         if self.isTrain:
             self.fake_A_pool = ImagePool(opt.pool_size)  # create image buffer to store previously generated images
@@ -89,7 +90,6 @@ class CycleGANModel(base_model.BaseModel):
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionCycle = torch.nn.L1Loss()
-            self.criterionIdt = torch.nn.L1Loss()
 
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()),

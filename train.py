@@ -20,7 +20,7 @@ import json
 import time
 from data.unaligned_pairs_loader import UnalignedPairsDataset
 from options.train_options import TrainOptions
-from models.cycle_gan_model import CycleGANModel
+import models
 from utils.visualizer import Visualizer
 
 if __name__ == '__main__':
@@ -32,10 +32,7 @@ if __name__ == '__main__':
     dataset_size = len(dataset)    # get the number of images in the dataset.
     print('The number of training images = %d' % dataset_size)
 
-    if opt.model == 'cycle_gan':
-        model = CycleGANModel(opt)
-    else:
-        model = AsymGANModel(opt)
+    model = models.create_model(opt)      # create a model given opt.model and other options
     model.setup(opt)               # regular setup: load and print networks; create schedulers
     visualizer = Visualizer(opt)   # create a visualizer that display/save images and plots
     total_iters = 0                # the total number of training iterations

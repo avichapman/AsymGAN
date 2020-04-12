@@ -118,8 +118,9 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
     return net
 
 
-def define_generator(input_nc, output_nc, ngf, architecture_name: str,
-                     norm='batch', use_dropout=False, init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_generator(input_nc: int, output_nc: int, ngf: int, architecture_name: str,
+                     norm: str = 'batch', use_dropout: bool = False, init_type: str = 'normal',
+                     init_gain: float = 0.02, gpu_ids: list = []):
     """Create a generator
 
     Parameters:
@@ -153,6 +154,10 @@ def define_generator(input_nc, output_nc, ngf, architecture_name: str,
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     elif architecture_name == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
+    elif architecture_name == 'stunted_resnet':
+        net = StuntedResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif architecture_name == 'resnet_with_aux':
+        net = ResnetWithAuxGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif architecture_name == 'unet_128':
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif architecture_name == 'unet_256':
@@ -196,12 +201,14 @@ def define_discriminator(input_nc: int, ndf: int, architecture_name: str, n_laye
     net = None
     norm_layer = get_norm_layer(norm_type=norm)
 
-    if architecture_name == 'basic':  # default PatchGAN classifier
+    if architecture_name == 'basic':  # default 70x78 PatchGAN classifier
         net = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer)
     elif architecture_name == 'n_layers':  # more options
         net = NLayerDiscriminator(input_nc, ndf, n_layers_d, norm_layer=norm_layer)
     elif architecture_name == 'pixel':     # classify if each pixel is real or fake
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
+    elif architecture_name == 'patch20':  # 20x20 PatchGAN classifier
+        net = PatchGAN20(input_nc, ndf, norm_layer=norm_layer)
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % architecture_name)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -316,6 +323,131 @@ def cal_gradient_penalty(netD, real_data, fake_data, device, type='mixed', const
         return 0.0, None
 
 
+class StuntedResnetGenerator(nn.Module):
+    """Resnet-based generator that generates a stunted resnet for use in encoding auxiliary data as described in:
+
+    Y. Li, S. Tang, R. Zhang, Y. Zhang, J. Li, and S. Yan, “Asymmetric GAN for Unpaired Image-to-Image
+        Translation,” IEEE Trans. Image Process., vol.
+    """
+
+    def __init__(self, input_nc: int, output_nc: int, ngf: int = 64, norm_layer=nn.BatchNorm2d,
+                 use_dropout: bool = False, padding_type: str = 'reflect'):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        n_blocks = 3
+
+        super(StuntedResnetGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = []
+
+        n_downsampling = 3
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):       # add ResNet blocks
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
+                                  use_bias=use_bias)]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input_value):
+        """Standard forward"""
+        return self.model(input_value)
+
+
+class ResnetWithAuxGenerator(nn.Module):
+    """Resnet-based generator that takes an aux variable and feeds it into the network at the half-way point as
+    described in:
+
+    Y. Li, S. Tang, R. Zhang, Y. Zhang, J. Li, and S. Yan, “Asymmetric GAN for Unpaired Image-to-Image
+        Translation,” IEEE Trans. Image Process., vol.
+    """
+
+    def __init__(self, input_nc: int, output_nc: int, ngf: int = 64, norm_layer=nn.BatchNorm2d,
+                 use_dropout: bool = False, padding_type: str = 'reflect'):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        super(ResnetWithAuxGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model_part_1 = [nn.ReflectionPad2d(3),
+                        nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                        norm_layer(ngf),
+                        nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model_part_1 += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                             norm_layer(ngf * mult * 2),
+                             nn.ReLU(True)]
+
+        n_blocks_before = 3
+        n_blocks_after = 3
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks_before):       # add ResNet blocks
+            model_part_1 += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer,
+                                         use_dropout=use_dropout, use_bias=use_bias)]
+
+        model_part_2 = []
+        for i in range(n_blocks_after):       # add ResNet blocks
+            model_part_2 += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer,
+                                         use_dropout=use_dropout, use_bias=use_bias)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model_part_2 += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                                kernel_size=3, stride=2,
+                                                padding=1, output_padding=1,
+                                                bias=use_bias),
+                             norm_layer(int(ngf * mult / 2)),
+                             nn.ReLU(True)]
+        model_part_2 += [nn.ReflectionPad2d(3)]
+        model_part_2 += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model_part_2 += [nn.Tanh()]
+
+        self.model_part_1 = nn.Sequential(*model_part_1)
+        self.model_part_2 = nn.Sequential(*model_part_2)
+
+    def forward_with_parts(self, b, e):
+        """Run model with the b domain input and the aux input.
+        """
+        value = self.model_part_1(b)
+        value = torch.cat((value, e))   # TODO: This will not work. Fix it.
+        return self.model_part_2(value)
+
+    def forward(self, input_value):
+        pass
+
+
 class ResnetGenerator(nn.Module):
     """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
 
@@ -357,8 +489,8 @@ class ResnetGenerator(nn.Module):
 
         mult = 2 ** n_downsampling
         for i in range(n_blocks):       # add ResNet blocks
-
-            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
+                                  use_bias=use_bias)]
 
         for i in range(n_downsampling):  # add upsampling layers
             mult = 2 ** (n_downsampling - i)
@@ -547,10 +679,12 @@ class UnetSkipConnectionBlock(nn.Module):
 
 
 class NLayerDiscriminator(nn.Module):
-    """Defines a PatchGAN discriminator"""
+    """Defines a PatchGAN discriminator. """
 
     def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d):
-        """Construct a PatchGAN discriminator
+        """Construct a PatchGAN discriminator.
+
+        When n_layers = 3, this ia 70x70 PatchGAN
 
         Parameters:
             input_nc (int)  -- the number of channels in input images
@@ -588,6 +722,48 @@ class NLayerDiscriminator(nn.Module):
 
         # output 1 channel prediction map
         sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
+        self.model = nn.Sequential(*sequence)
+
+    def forward(self, input):
+        """Standard forward."""
+        return self.model(input)
+
+
+class PatchGAN20(nn.Module):
+    """Defines a 20x20 PatchGAN discriminator. """
+
+    def __init__(self, input_nc, ndf=64, norm_layer=nn.BatchNorm2d):
+        """Construct a PatchGAN discriminator.
+
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            ndf (int)       -- the number of filters in the last conv layer
+            norm_layer      -- normalization layer
+        """
+        super(PatchGAN20, self).__init__()
+        if type(norm_layer) == functools.partial:  # no need to use bias as BatchNorm2d has affine parameters
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        kw = 4
+        padw = 1
+        sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
+        nf_mult = 1
+        n_layers = 1
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True),
+            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True)
+        ]
+
+        # output 1 channel prediction map
+        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=3, stride=1, padding=padw)]
         self.model = nn.Sequential(*sequence)
 
     def forward(self, input):
