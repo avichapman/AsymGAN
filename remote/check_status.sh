@@ -2,7 +2,7 @@
 
 IFS=
 
-expected_job_names=(gan_cycle gan_asym)
+expected_job_names=(gan_asym gan_cycle)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
