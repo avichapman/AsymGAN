@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as functional
 from torch.nn import init
 import functools
 from torch.optim import lr_scheduler
+from typing import Tuple
 
 
 ###############################################################################
@@ -350,7 +352,10 @@ class StuntedResnetGenerator(nn.Module):
         else:
             use_bias = norm_layer == nn.InstanceNorm2d
 
-        model = []
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
 
         n_downsampling = 3
         for i in range(n_downsampling):  # add downsampling layers
@@ -418,17 +423,25 @@ class ResnetWithAuxGenerator(nn.Module):
                                          use_dropout=use_dropout, use_bias=use_bias)]
 
         model_part_2 = []
+        aux_features = 512
+        feature_count = aux_features + ngf * mult
         for i in range(n_blocks_after):       # add ResNet blocks
-            model_part_2 += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer,
+            model_part_2 += [ResnetBlock(feature_count, padding_type=padding_type, norm_layer=norm_layer,
                                          use_dropout=use_dropout, use_bias=use_bias)]
 
         for i in range(n_downsampling):  # add upsampling layers
             mult = 2 ** (n_downsampling - i)
-            model_part_2 += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+            out_features = int(ngf * mult / 2)
+            if i == 0:
+                in_features = feature_count
+            else:
+                in_features = ngf * mult
+
+            model_part_2 += [nn.ConvTranspose2d(in_features, out_features,
                                                 kernel_size=3, stride=2,
                                                 padding=1, output_padding=1,
                                                 bias=use_bias),
-                             norm_layer(int(ngf * mult / 2)),
+                             norm_layer(out_features),
                              nn.ReLU(True)]
         model_part_2 += [nn.ReflectionPad2d(3)]
         model_part_2 += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
@@ -437,15 +450,33 @@ class ResnetWithAuxGenerator(nn.Module):
         self.model_part_1 = nn.Sequential(*model_part_1)
         self.model_part_2 = nn.Sequential(*model_part_2)
 
-    def forward_with_parts(self, b, e):
+    @staticmethod
+    def size_up(x: torch.Tensor, size: list) -> torch.Tensor:
+        r"""Uses bilinear interpolation to convert the input tensor to have double the height and width.
+        Opposite of a pooling operation.
+        Args:
+            x: torch.Tensor. 4D Tensor. Shape (Batch Size, Channel Count = 3, Height, Width)
+            size: (int or Tuple[int] or Tuple[int, int] or Tuple[int, int, int]): output spatial size.
+        Returns
+        -------
+        torch.Tensor. 4D Tensor. Shape (Batch Size, Channel Count = 3, 2 x Input Height, 2 x Input Width)
+        """
+        return functional.interpolate(x, size=size, mode='bilinear', align_corners=False)
+
+    def forward(self, data: Tuple[torch.Tensor, torch.Tensor]):
         """Run model with the b domain input and the aux input.
         """
-        value = self.model_part_1(b)
-        value = torch.cat((value, e))   # TODO: This will not work. Fix it.
-        return self.model_part_2(value)
+        # Unpack data into two tensors, y input and the z data taken in in the middle of the network...
+        y = data[0]
+        z = data[1]
 
-    def forward(self, input_value):
-        pass
+        value = self.model_part_1(y)
+
+        # Scale z up by 2x2 and concatenate on the feature dimension...
+        z = self.size_up(z, size=[value.size()[2], value.size()[3]])
+        value = torch.cat((value, z), 1)
+
+        return self.model_part_2(value)
 
 
 class ResnetGenerator(nn.Module):
@@ -751,22 +782,28 @@ class PatchGAN20(nn.Module):
         sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
         nf_mult = 1
         n_layers = 1
+
         nf_mult_prev = nf_mult
-        nf_mult = min(2 ** n_layers, 8)
+        nf_mult = min(2 ** 1, 8)
         sequence += [
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
             norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, True),
+        ]
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** 2, 8)
+        sequence += [
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
             norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2, True)
+            nn.LeakyReLU(0.2, True),
         ]
 
         # output 1 channel prediction map
         sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=3, stride=1, padding=padw)]
         self.model = nn.Sequential(*sequence)
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Standard forward."""
         return self.model(input)
 

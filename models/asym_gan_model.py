@@ -6,6 +6,8 @@ from . import base_model
 from . import style_loss_net
 from utils.image_pool import ImagePool
 
+_aux_data_channel_count = 512
+
 
 class AsymGANModel(base_model.BaseModel):
     """
@@ -66,6 +68,9 @@ class AsymGANModel(base_model.BaseModel):
             parser.add_argument('--netGE', type=str, default='stunted_resnet',
                                 help='specify generator architecture [stunted_resnet]')
             parser.add_argument('--netDE', type=str, default='patch20', help='specify generator architecture [patch20]')
+            parser.add_argument('--lr_g', type=float, default=0.0002, help='initial learning rate for adam generators')
+            parser.add_argument('--lr_d', type=float, default=0.0001,
+                                help='initial learning rate for adam discriminators')
 
         return parser
 
@@ -78,9 +83,9 @@ class AsymGANModel(base_model.BaseModel):
         base_model.BaseModel.__init__(self, opt)
 
         # specify the training losses you want to print out.
-        self.loss_names = ['loss_D_A', 'loss_D_B', 'loss_D_Z', 'loss_E', 'loss_G_A', 'loss_G_B', 'loss_cycle_A',
-                           'loss_cycle_B', 'loss_cycle_Z', 'loss_content', 'loss_style', 'loss_total_variation',
-                           'loss_G']
+        self.loss_names = ['D_A', 'D_B', 'D_Z', 'E', 'G_A', 'G_B', 'cycle_A',
+                           'cycle_B', 'cycle_Z', 'content', 'style', 'total_variation',
+                           'G']
         # specify the images you want to save/display.
         visual_names_a = ['real_A', 'fake_B', 'rec_A']
         visual_names_b = ['real_B', 'fake_A', 'rec_B']
@@ -89,7 +94,7 @@ class AsymGANModel(base_model.BaseModel):
 
         # specify the models you want to save to the disk...
         if self.isTrain:
-            self.model_names = ['G_A', 'G_B', 'E', 'D_A', 'D_B', 'D_E']
+            self.model_names = ['G_A', 'G_B', 'E', 'D_A', 'D_B', 'D_Z']
         else:  # during test time, only load generators
             self.model_names = ['G_A', 'G_B', 'E']
 
@@ -110,7 +115,7 @@ class AsymGANModel(base_model.BaseModel):
             self.netD_B = networks.define_discriminator(opt.input_nc, opt.ndf, opt.netD,
                                                         opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain,
                                                         self.gpu_ids)
-            self.netD_Z = networks.define_discriminator(opt.input_nc, opt.ndf, opt.netDE,
+            self.netD_Z = networks.define_discriminator(_aux_data_channel_count, opt.ndf, opt.netDE,
                                                         opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain,
                                                         self.gpu_ids)
 
@@ -122,18 +127,18 @@ class AsymGANModel(base_model.BaseModel):
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionCycle = torch.nn.L1Loss()
-            self.styleLossNet = style_loss_net.StyleLossNet()
+            self.styleLossNet = style_loss_net.StyleLossNet().to(self.device)
 
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(),
                                                                 self.netG_B.parameters(),
                                                                 self.netE.parameters()),
-                                                lr=opt.lr,
+                                                lr=opt.lr_g,
                                                 betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(),
                                                                 self.netD_B.parameters(),
                                                                 self.netD_Z.parameters()),
-                                                lr=opt.lr,
+                                                lr=opt.lr_d,
                                                 betas=(opt.beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
@@ -147,7 +152,6 @@ class AsymGANModel(base_model.BaseModel):
         self.rec_A = None
         self.rec_A_real_Z = None
         self.rec_B = None
-        self.rec_B_fake_Z = None
         self.fake_A_fake_Z = None
         self.rec_Z = None
         self.loss_D_A = None
@@ -175,7 +179,6 @@ class AsymGANModel(base_model.BaseModel):
         a_to_b = self.opt.direction == 'AtoB'
         self.real_A = values['A' if a_to_b else 'B'].to(self.device)
         self.real_B = values['B' if a_to_b else 'A'].to(self.device)
-        self.real_Z = torch.randn(self.real_A.size()).to(self.device)  # TODO See if the size is right
         self.image_paths = values['A_paths' if a_to_b else 'B_paths']
 
     def forward(self):
@@ -184,15 +187,15 @@ class AsymGANModel(base_model.BaseModel):
         # Forward pass, as shown in Fig 2 (1) in the paper...
         self.fake_B = self.netG_A(self.real_A)  # G_A(A)
         self.fake_Z = self.netE(self.real_A)    # E(A)
-        self.rec_A = self.netG_B.forward_with_parts(self.fake_B, self.fake_Z)          # G_B(G_A(X), Z(X))
-        self.rec_A_real_Z = self.netG_B.forward_with_parts(self.fake_B, self.real_Z)   # G_B(G_A(X), E)
+        self.real_Z = torch.randn(self.fake_Z.size()).to(self.device)
+        self.rec_A = self.netG_B((self.fake_B, self.fake_Z))          # G_B(G_A(X), Z(X))
+        self.rec_A_real_Z = self.netG_B((self.fake_B, self.real_Z))   # G_B(G_A(X), E)
 
         # Backward pass, as shown in Fig 2 (2) in the paper...
-        self.fake_A = self.netG_B.forward_with_parts(self.real_B, self.real_Z)         # G_B(Y, Z)
-        self.rec_B = self.netG_A(self.fake_A)                                          # G_A(G_B(Y, Z))
-        self.fake_A_fake_Z = self.netG_B.forward_with_parts(self.real_B, self.fake_Z)  # G_B(Y, E(X))
-        self.rec_B_fake_Z = self.netG_A(self.fake_A_fake_Z)                            # G_A(G_B(Y, E(X)))
-        self.rec_Z = self.netE(self.fake_A)                                            # E(G_B(Y, Z))
+        self.fake_A = self.netG_B((self.real_B, self.real_Z))         # G_B(Y, Z)
+        self.rec_B = self.netG_A(self.fake_A)                         # G_A(G_B(Y, Z))
+        self.fake_A_fake_Z = self.netG_B((self.real_B, self.fake_Z))  # G_B(Y, E(X))
+        self.rec_Z = self.netE(self.fake_A)                           # E(G_B(Y, Z))
 
     def backward_d_basic(self, net_d, real, fake):
         """Calculate GAN loss for the discriminator
@@ -270,14 +273,14 @@ class AsymGANModel(base_model.BaseModel):
         #                           + ϕ(G_B(Y, E)) + ϕ(G_A(G_B(B, E))) + ϕ(G_A(G_B(B, E(A))))) (Eqn. (18) in the paper)
         self.loss_style, self.loss_content, self.loss_total_variation = \
             self.styleLossNet.calculate_losses(self.real_A, self.fake_A, self.fake_A_fake_Z, self.rec_A,
-                                               self.real_B, self.rec_B_fake_Z, self.rec_B)
+                                               self.rec_A_real_Z, self.real_B, self.fake_B, self.rec_B)
 
         self.loss_content = lambda_7 * self.loss_content
         self.loss_style = lambda_8 * self.loss_style
         self.loss_total_variation = lambda_9 * self.loss_total_variation
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_D_Z + self.loss_cycle_A + self.loss_cycle_B + self.loss_cycle_Z + self.loss_G_A + \
+        self.loss_G = self.loss_E + self.loss_cycle_A + self.loss_cycle_B + self.loss_cycle_Z + self.loss_G_A + \
             self.loss_G_B + self.loss_content + self.loss_style + self.loss_total_variation
         self.loss_G.backward()
 

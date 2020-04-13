@@ -17,7 +17,7 @@ class UnalignedPairsDataset(Dataset):
             transform=None,
             train: bool = False):
 
-        self.division = 3  # Divide images into sections 1/9 in size
+        self.division = 4  # Divide images into sections 1/9 in size
         image_paths = image_paths * self.division * self.division
         if shuffle:
             random.shuffle(image_paths)
@@ -98,10 +98,11 @@ class UnalignedPairsDataset(Dataset):
         dy = int(random.random()*img.size[1]*1./self.division)
 
         # Adjust slice so that its width and height are evenly divisible by 4...
-        if crop_size[0] % 4 != 0:
-            crop_size[0] += 4 - crop_size[0] % 4
-        if crop_size[1] % 4 != 0:
-            crop_size[1] += 4 - crop_size[1] % 4
+        nearest_neighbor = 4
+        if crop_size[0] % nearest_neighbor != 0:
+            crop_size[0] += nearest_neighbor - crop_size[0] % nearest_neighbor
+        if crop_size[1] % nearest_neighbor != 0:
+            crop_size[1] += nearest_neighbor - crop_size[1] % nearest_neighbor
 
         img = img.crop((dx, dy, crop_size[0]+dx, crop_size[1]+dy))
         target = target[dy:int(crop_size[1]+dy), dx:int(crop_size[0]+dx)]

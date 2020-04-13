@@ -55,8 +55,9 @@ class StyleLossNet(nn.Module):
                          a_fake: torch.Tensor,         # G_B(Y, Z)
                          a_fake_z_fake: torch.Tensor,  # G_B(Y, E(X))
                          a_rec: torch.Tensor,          # G_B(G_A(X), E(X))
+                         a_rec_z_real: torch.Tensor,   # G_B(G_A(A), E)
                          b_real: torch.Tensor,         # Y
-                         b_fake_z_fake: torch.Tensor,  # G_A(G_B(Y, E(X)))
+                         b_fake: torch.Tensor,         # G_A(X)
                          b_rec: torch.Tensor           # G_A(G_B(Y, Z))
                          ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -68,7 +69,9 @@ class StyleLossNet(nn.Module):
              a_fake:         G_B(Y, Z)
              a_fake_z_fake:  G_B(Y, E(X))
              a_rec:          G_B(G_A(X), E(X))
+             a_rec_z_real:   G_B(G_A(A), E)
              b_real:         Y
+             b_fake:         G_A(X)
              b_fake_z_fake:  G_A(G_B(Y, E(X)))
              b_rec:          G_A(G_B(Y, Z))
 
@@ -82,8 +85,7 @@ class StyleLossNet(nn.Module):
         """
 
         # Calculate style loss...
-        # Style Loss: E[P_φj(G_B(Y, E(X))) - P_φj(X)]_F^2 (Eqn. (16) in the )
-        style_loss = 0.0
+        # Style Loss: E[P_φj(G_B(Y, E(X))) - P_φj(X)]_F^2 (Eqn. (16) in the paper)
         a_fake_gram = self._calculate_gram_matrix(a_fake_z_fake)
         a_real_gram = self._calculate_gram_matrix(a_real)
 
@@ -93,25 +95,27 @@ class StyleLossNet(nn.Module):
         style_loss += self.loss_mse(a_fake_gram[3], a_real_gram[3])
 
         # Calculate content loss (h_relu_2_2)
-        # Content Loss: avg(E[||φ_j(G_B(Y, E(X))) - φ_j(Y)||^2]) (Eqn. (15) in the )
+        # Content Loss: avg(E[||φ_j(G_B(Y, E(X))) - φ_j(Y)||^2]) (Eqn. (15) in the paper)
         content_loss = self.loss_mse(a_fake_z_fake, b_real)
 
         # calculate total variation regularization (anisotropic version)
         # https://www.wikiwand.com/en/Total_variation_denoising
         #
-        # Total Variation Loss: (ϕ(G_A(A)) + ϕ(G_B(G_A(A), E(A))) + ϕ(G_B(G_A(A), E))
-        #                           + ϕ(G_B(Y, E)) + ϕ(G_A(G_B(B, E))) + ϕ(G_A(G_B(B, E(A))))) (Eqn. (18) in the paper)
-        tvr_loss_a_real = self._calculate_tvr_loss(a_real)
+        # Total Variation Loss: (ϕ(G_A(x)) + ϕ(G_B(G_A(x), E(x))) + ϕ(G_B(G_A(x), e))
+        #                           + ϕ(G_B(y, e)) + ϕ(G_A(G_B(y, e))) + ϕ(G_A(G_B(y, E(x))))) (Eqn. (18) in the paper)
+        tvr_loss_b_fake = self._calculate_tvr_loss(b_fake)
         tvr_loss_a_rec = self._calculate_tvr_loss(a_rec)
+        tvr_loss_a_rec_z_real = self._calculate_tvr_loss(a_rec_z_real)
         tvr_loss_a_fake = self._calculate_tvr_loss(a_fake)
         tvr_loss_b_rec = self._calculate_tvr_loss(b_rec)
-        tvr_loss_b_fake_z_fake = self._calculate_tvr_loss(b_fake_z_fake)
-        tvr_loss = tvr_loss_a_real + tvr_loss_a_rec + tvr_loss_a_fake + tvr_loss_b_rec + tvr_loss_b_fake_z_fake
+        tvr_loss_a_fake_z_fake = self._calculate_tvr_loss(a_fake_z_fake)
+        tvr_loss = tvr_loss_b_fake + tvr_loss_a_rec + tvr_loss_a_rec_z_real + tvr_loss_a_fake + tvr_loss_b_rec + \
+            tvr_loss_a_fake_z_fake
 
         return style_loss, content_loss, tvr_loss
 
     @staticmethod
-    def _calculate_tvr_loss(self, x: torch.Tensor) -> torch.Tensor:
+    def _calculate_tvr_loss(x: torch.Tensor) -> torch.Tensor:
         """
         # calculate total variation regularization (anisotropic version)
         # https://www.wikiwand.com/en/Total_variation_denoising
